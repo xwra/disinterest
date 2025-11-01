@@ -6,9 +6,12 @@
 import { type Chunk } from "./http.ts";
 import { ChunkedStream } from "./stream.ts";
 
-type Attrs = Record<string, string | number | boolean>;
+export type Attrs = Record<
+  string,
+  string | number | boolean | null | undefined
+>;
 
-const VOID_TAGS = new Set([
+export const VOID_TAGS = new Set([
   "area",
   "base",
   "br",
@@ -66,6 +69,7 @@ type TagRes = void | Promise<void>;
 
 type TagFn = {
   (attrs: Attrs, ...children: Chunk[]): TagRes;
+  (attrs: Attrs, fn: () => any): TagRes;
   (...children: Chunk[]): TagRes;
   (template: TemplateStringsArray, ...values: Chunk[]): TagRes;
   (fn: () => any): TagRes;
@@ -73,30 +77,33 @@ type TagFn = {
 
 export type HtmlProxy = { [K in keyof HTMLElementTagNameMap]: TagFn } & {
   [key: string]: TagFn;
-} & { render(child: any): Promise<void> };
+};
 
 const isTemplateLiteral = (arg: any): arg is TemplateStringsArray =>
   Array.isArray(arg) && "raw" in arg;
 
 const isAttributes = (arg: any): arg is Record<string, any> =>
-  arg && typeof arg === "object" && !isTemplateLiteral(arg);
+  arg && typeof arg === "object" && !isTemplateLiteral(arg) &&
+  !Array.isArray(arg) && !(arg instanceof Promise);
 
-async function render(child: any): Promise<string> {
+async function render(child: unknown): Promise<string> {
   if (child == null) return "";
-  if (typeof child === "string" || typeof child === "number") {
-    return String(child);
-  }
+
+  if (typeof child === "string") return escape(child);
+  if (typeof child === "number") return String(child);
+  if (typeof child === "boolean") return String(Number(child));
+
   if (child instanceof Promise) return render(await child);
+
   if (Array.isArray(child)) {
     return (await Promise.all(child.map(render))).join("");
   }
+
   if (typeof child === "function") return render(await child());
-  return String(child);
+  return escape(String(child));
 }
 
-export function html(
-  chunks: ChunkedStream<string>,
-): HtmlProxy {
+export function html(chunks: ChunkedStream<string>): HtmlProxy {
   const cache = new Map<string, TagFn>();
   const write = (buf: string) => !chunks.closed && chunks.write(buf);
 
@@ -105,11 +112,11 @@ export function html(
       let fn = cache.get(tag);
       if (fn) return fn;
 
-      fn = async (...args: any[]) => {
+      fn = async (...args: unknown[]) => {
         const attrs = isAttributes(args[0]) ? args.shift() : undefined;
 
         const isVoid = VOID_TAGS.has(tag.toLowerCase());
-        const attributes = serialize(attrs);
+        const attributes = serialize(attrs as Attrs);
 
         write(`<${tag}${attributes}${isVoid ? "/" : ""}>`);
         if (isVoid) return;
@@ -126,7 +133,5 @@ export function html(
   };
 
   const proxy = new Proxy({}, handler) as HtmlProxy;
-  proxy.render = async (stuff: any) => void write(await render(stuff));
-
   return proxy;
 }

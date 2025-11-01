@@ -15,7 +15,9 @@ export type Chunk =
   | string
   | AsyncIterable<string>
   | Promise<string>
-  | Iterable<string>;
+  | Iterable<string>
+  | null
+  | undefined;
 
 async function* normalize(
   value: Chunk | undefined | null,
@@ -23,7 +25,6 @@ async function* normalize(
   if (value == null) return;
 
   if (typeof value === "string") {
-    3;
     yield value;
   } else if (value instanceof Promise) {
     const resolved = await value;
@@ -31,7 +32,6 @@ async function* normalize(
   } else if (Symbol.asyncIterator in value || Symbol.iterator in value) {
     for await (const chunk of value as AsyncIterable<string>) {
       if (chunk != null) yield String(chunk);
-      1;
     }
   } else {
     yield String(value);
@@ -52,6 +52,7 @@ export const makeChunkWriter =
 
     for (let i = 0; i < strings.length; i++) {
       strings[i] && emit(strings[i]);
+
       for await (const chunk of normalize(values[i])) {
         emit(chunk);
       }
@@ -64,10 +65,14 @@ export function chunkedHtml() {
   const stream = new ReadableStream<Uint8Array>({
     async start(controller) {
       const encoder = new TextEncoder();
-      for await (const chunk of chunks) {
-        controller.enqueue(encoder.encode(chunk));
+      try {
+        for await (const chunk of chunks) {
+          controller.enqueue(encoder.encode(chunk));
+        }
+        controller.close();
+      } catch (error) {
+        controller.error(error);
       }
-      controller.close();
     },
     cancel: chunks.close,
   });
@@ -82,7 +87,18 @@ const HEAD_END = "</head><body";
 const BODY_END = ">";
 const HTML_END = "</body></html>";
 
-export async function createHtmlStream(options: StreamOptions = {}) {
+export interface HtmlStream {
+  write: ChunkedWriter;
+  blob: ReadableStream<Uint8Array>;
+  chunks: ChunkedStream<string>;
+  close(): void;
+  error(err: Error): void;
+  readonly response: Response;
+}
+
+export async function createHtmlStream(
+  options: StreamOptions = {},
+): Promise<HtmlStream> {
   const { chunks, stream } = chunkedHtml();
   const writer = makeChunkWriter(chunks);
 
@@ -103,15 +119,14 @@ export async function createHtmlStream(options: StreamOptions = {}) {
         chunks.close();
       }
     },
-    get response(): Response {
-      return new Response(stream, {
-        headers: {
-          "Content-Type": "text/html; charset=utf-8",
-          "Transfer-Encoding": "chunked",
-          "Cache-Control": "no-cache",
-          "Connection": "keep-alive",
-        },
-      });
-    },
+    error: chunks.error,
+    response: new Response(stream, {
+      headers: {
+        "Content-Type": "text/html; charset=utf-8",
+        "Transfer-Encoding": "chunked",
+        "Cache-Control": "no-cache",
+        "Connection": "keep-alive",
+      },
+    }),
   };
 }

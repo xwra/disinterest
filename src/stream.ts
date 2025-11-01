@@ -5,7 +5,11 @@
 
 export class ChunkedStream<T> implements AsyncIterable<T> {
   private readonly chunks: T[] = [];
+
   private readonly resolvers: ((result: IteratorResult<T>) => void)[] = [];
+  private readonly rejectors: ((error: Error) => void)[] = [];
+
+  private _error: Error | null = null;
   private _closed = false;
 
   get closed(): boolean {
@@ -17,6 +21,7 @@ export class ChunkedStream<T> implements AsyncIterable<T> {
 
     const resolver = this.resolvers.shift();
     if (resolver) {
+      this.rejectors.shift();
       resolver({ value: chunk, done: false });
     } else {
       this.chunks.push(chunk);
@@ -26,16 +31,37 @@ export class ChunkedStream<T> implements AsyncIterable<T> {
   close(): void {
     this._closed = true;
     while (this.resolvers.length) {
+      this.rejectors.shift();
       this.resolvers.shift()!({ value: undefined! as any, done: true });
     }
   }
 
+  error(err: Error): void {
+    if (this._closed) return;
+
+    this._error = err;
+    this._closed = true;
+
+    while (this.rejectors.length) {
+      this.rejectors.shift()!(err);
+      this.resolvers.shift();
+    }
+  }
+
   async next(): Promise<IteratorResult<T>> {
+    if (this._error) {
+      throw this._error;
+    }
+
     if (this.chunks.length) {
       return { value: this.chunks.shift()!, done: false };
     }
     if (this._closed) return { value: undefined as any, done: true };
-    return new Promise((resolve) => this.resolvers.push(resolve));
+
+    return new Promise((resolve, reject) => {
+      this.resolvers.push(resolve);
+      this.rejectors.push(reject);
+    });
   }
 
   [Symbol.asyncIterator](): AsyncIterableIterator<T> {
@@ -44,20 +70,20 @@ export class ChunkedStream<T> implements AsyncIterable<T> {
 }
 
 export const mapStream = <T, U>(
-  fn: (chunk: T, i: number) => U | Promise<U>,
+  fn: (chunk: T, index: number) => U | Promise<U>,
 ) =>
   async function* (source: AsyncIterable<T>): AsyncIterable<U> {
-    let i = 0;
-    for await (const chunk of source) yield await fn(chunk, i++);
+    let index = 0;
+    for await (const chunk of source) yield await fn(chunk, index++);
   };
 
 export const filterStream = <T>(
-  pred: (chunk: T, i: number) => boolean | Promise<boolean>,
+  pred: (chunk: T, index: number) => boolean | Promise<boolean>,
 ) =>
   async function* (source: AsyncIterable<T>): AsyncIterable<T> {
-    let i = 0;
+    let index = 0;
     for await (const chunk of source) {
-      if (await pred(chunk, i++)) yield chunk;
+      if (await pred(chunk, index++)) yield chunk;
     }
   };
 
@@ -72,9 +98,9 @@ export const takeStream = <T>(count: number) =>
 
 export const skipStream = <T>(count: number) =>
   async function* (source: AsyncIterable<T>): AsyncIterable<T> {
-    let i = 0;
+    let index = 0;
     for await (const chunk of source) {
-      if (i++ >= count) yield chunk;
+      if (index++ >= count) yield chunk;
     }
   };
 
@@ -88,17 +114,28 @@ export const batchStream = <T>(size: number) =>
         batch = [];
       }
     }
-    batch.length && (yield batch);
+    if (batch.length) yield batch;
   };
 
 export const tapStream = <T>(
-  fn: (chunk: T, i: number) => void | Promise<void>,
+  fn: (chunk: T, index: number) => void | Promise<void>,
 ) =>
   async function* (source: AsyncIterable<T>): AsyncIterable<T> {
-    let i = 0;
+    let index = 0;
     for await (const chunk of source) {
       yield chunk;
-      await fn(chunk, i++);
+      await fn(chunk, index++);
+    }
+  };
+
+export const catchStream = <T>(
+  handler: (error: Error) => void | Promise<void>,
+) =>
+  async function* (source: AsyncIterable<T>): AsyncIterable<T> {
+    try {
+      for await (const chunk of source) yield chunk;
+    } catch (err) {
+      await handler(err instanceof Error ? err : new Error(String(err)));
     }
   };
 
