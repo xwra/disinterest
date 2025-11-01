@@ -2,6 +2,9 @@
   "tasks": {
     "dev": "deno run --allow-net src/main.ts"
   },
+  "imports": {
+    "interest/jsx-runtime": "./src/jsx.ts"
+  },
   "lint": {
     "rules": {
       "tags": [
@@ -11,14 +14,13 @@
     }
   },
   "compilerOptions": {
+    "jsx": "react-jsx",
+    "jsxImportSource": "interest",
     "lib": [
       "deno.ns",
       "esnext",
       "dom",
       "dom.iterable"
     ]
-  },
-  "imports": {
-    "@std/assert": "jsr:@std/assert@1"
   }
 }

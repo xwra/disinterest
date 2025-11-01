@@ -71,9 +71,9 @@ type TagFn = {
   (fn: () => any): TagRes;
 };
 
-type HtmlProxy = { [K in keyof HTMLElementTagNameMap]: TagFn } & {
+export type HtmlProxy = { [K in keyof HTMLElementTagNameMap]: TagFn } & {
   [key: string]: TagFn;
-};
+} & { render(child: any): Promise<void> };
 
 const isTemplateLiteral = (arg: any): arg is TemplateStringsArray =>
   Array.isArray(arg) && "raw" in arg;
@@ -125,5 +125,8 @@ export function html(
     },
   };
 
-  return new Proxy({}, handler) as HtmlProxy;
+  const proxy = new Proxy({}, handler) as HtmlProxy;
+  proxy.render = async (stuff: any) => void write(await render(stuff));
+
+  return proxy;
 }
