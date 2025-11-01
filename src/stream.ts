@@ -5,38 +5,37 @@
 
 export class ChunkedStream<T> implements AsyncIterable<T> {
   private readonly chunks: T[] = [];
-  private readonly queue: ((result: IteratorResult<T>) => void)[] = [];
+  private readonly resolvers: ((result: IteratorResult<T>) => void)[] = [];
   private _closed = false;
 
   get closed(): boolean {
     return this._closed;
   }
 
-  write(chunk: T): void {
+  write(chunk: T) {
     if (this._closed) throw new Error("Cannot write to closed stream");
-    this.queue.shift()?.({ value: chunk, done: false }) ??
+
+    const resolver = this.resolvers.shift();
+    if (resolver) {
+      resolver({ value: chunk, done: false });
+    } else {
       this.chunks.push(chunk);
+    }
   }
 
   close(): void {
     this._closed = true;
-    this.queue.splice(0).forEach((r) => r({ value: undefined, done: true }));
+    while (this.resolvers.length) {
+      this.resolvers.shift()!({ value: undefined! as any, done: true });
+    }
   }
 
-  next(): Promise<IteratorResult<T>> {
+  async next(): Promise<IteratorResult<T>> {
     if (this.chunks.length) {
-      return Promise.resolve({
-        value: this.chunks.shift()!,
-        done: false,
-      });
+      return { value: this.chunks.shift()!, done: false };
     }
-    if (this._closed) {
-      return Promise.resolve({
-        value: undefined as any,
-        done: true,
-      });
-    }
-    return new Promise((resolve) => this.queue.push(resolve));
+    if (this._closed) return { value: undefined as any, done: true };
+    return new Promise((resolve) => this.resolvers.push(resolve));
   }
 
   [Symbol.asyncIterator](): AsyncIterableIterator<T> {
@@ -44,94 +43,65 @@ export class ChunkedStream<T> implements AsyncIterable<T> {
   }
 }
 
-export async function* mapStream<T, U>(
-  source: AsyncIterable<T>,
-  fn: (chunk: T, index: number) => U | Promise<U>,
-): AsyncIterable<U> {
-  let index = 0;
-  for await (const chunk of source) {
-    yield await fn(chunk, index++);
-  }
-}
+export const mapStream = <T, U>(
+  fn: (chunk: T, i: number) => U | Promise<U>,
+) =>
+  async function* (source: AsyncIterable<T>): AsyncIterable<U> {
+    let i = 0;
+    for await (const chunk of source) yield await fn(chunk, i++);
+  };
 
-export async function* filterStream<T>(
-  source: AsyncIterable<T>,
-  predicate: (chunk: T, index: number) => boolean | Promise<boolean>,
-): AsyncIterable<T> {
-  let index = 0;
-  for await (const chunk of source) {
-    if (await predicate(chunk, index++)) {
+export const filterStream = <T>(
+  pred: (chunk: T, i: number) => boolean | Promise<boolean>,
+) =>
+  async function* (source: AsyncIterable<T>): AsyncIterable<T> {
+    let i = 0;
+    for await (const chunk of source) {
+      if (await pred(chunk, i++)) yield chunk;
+    }
+  };
+
+export const takeStream = <T>(count: number) =>
+  async function* (source: AsyncIterable<T>): AsyncIterable<T> {
+    let taken = 0;
+    for await (const chunk of source) {
+      if (taken++ >= count) return;
       yield chunk;
     }
-  }
-}
+  };
 
-export async function* composeStreams<T>(
-  ...sources: AsyncIterable<T>[]
-): AsyncIterable<T> {
-  for (const source of sources) {
-    yield* source;
-  }
-}
+export const skipStream = <T>(count: number) =>
+  async function* (source: AsyncIterable<T>): AsyncIterable<T> {
+    let i = 0;
+    for await (const chunk of source) {
+      if (i++ >= count) yield chunk;
+    }
+  };
 
-export async function* takeStream<T>(
-  source: AsyncIterable<T>,
-  count: number,
-): AsyncIterable<T> {
-  let taken = 0;
-  for await (const chunk of source) {
-    if (taken++ >= count) break;
-    yield chunk;
-  }
-}
+export const batchStream = <T>(size: number) =>
+  async function* (source: AsyncIterable<T>): AsyncIterable<T[]> {
+    let batch: T[] = [];
+    for await (const chunk of source) {
+      batch.push(chunk);
+      if (batch.length >= size) {
+        yield batch;
+        batch = [];
+      }
+    }
+    batch.length && (yield batch);
+  };
 
-export async function* skipStream<T>(
-  source: AsyncIterable<T>,
-  count: number,
-): AsyncIterable<T> {
-  let skipped = 0;
-  for await (const chunk of source) {
-    if (skipped++ >= count) {
+export const tapStream = <T>(
+  fn: (chunk: T, i: number) => void | Promise<void>,
+) =>
+  async function* (source: AsyncIterable<T>): AsyncIterable<T> {
+    let i = 0;
+    for await (const chunk of source) {
       yield chunk;
+      await fn(chunk, i++);
     }
-  }
-}
+  };
 
-export async function* batchStream<T>(
-  source: AsyncIterable<T>,
-  size: number,
-): AsyncIterable<T[]> {
-  let batch: T[] = [];
-
-  for await (const chunk of source) {
-    batch.push(chunk);
-    if (batch.length >= size) {
-      yield batch, batch = [];
-    }
-  }
-
-  if (batch.length > 0) {
-    yield batch;
-  }
-}
-
-export async function* flatMapStream<T, U>(
-  source: AsyncIterable<T>,
-  fn: (chunk: T, index: number) => AsyncIterable<U> | Iterable<U>,
-): AsyncIterable<U> {
-  let index = 0;
-  for await (const chunk of source) {
-    yield* fn(chunk, index++);
-  }
-}
-
-export async function* tapStream<T>(
-  source: AsyncIterable<T>,
-  fn: (chunk: T, index: number) => void | Promise<void>,
-): AsyncIterable<T> {
-  let index = 0;
-  for await (const chunk of source) {
-    yield chunk;
-    await fn(chunk, index++);
-  }
-}
+export const pipe =
+  <T>(...fns: Array<(src: AsyncIterable<T>) => AsyncIterable<any>>) =>
+  (source: AsyncIterable<T>) => fns.reduce((acc, fn) => fn(acc), source);

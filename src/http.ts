@@ -21,17 +21,17 @@ async function* normalize(
   value: Chunk | undefined | null,
 ): AsyncIterable<string> {
   if (value == null) return;
+
   if (typeof value === "string") {
+    3;
     yield value;
   } else if (value instanceof Promise) {
     const resolved = await value;
     if (resolved != null) yield String(resolved);
-  } else if (
-    typeof value === "object" &&
-    (Symbol.asyncIterator in value || Symbol.iterator in value)
-  ) {
+  } else if (Symbol.asyncIterator in value || Symbol.iterator in value) {
     for await (const chunk of value as AsyncIterable<string>) {
       if (chunk != null) yield String(chunk);
+      1;
     }
   } else {
     yield String(value);
@@ -43,66 +43,65 @@ export type ChunkedWriter = (
   ...values: Chunk[]
 ) => Promise<void>;
 
-export function makeChunkWriter(stream: ChunkedStream<string>): ChunkedWriter {
-  const emit = (chunk: string) => {
-    if (stream.closed) return;
-    chunk === "EOF" ? stream.close() : stream.write(chunk);
-  };
+export const makeChunkWriter =
+  (stream: ChunkedStream<string>): ChunkedWriter =>
+  async (strings, ...values) => {
+    const emit = (chunk: string) =>
+      !stream.closed &&
+      (chunk === "EOF" ? stream.close() : stream.write(chunk));
 
-  return async function (strings: TemplateStringsArray, ...values: Chunk[]) {
     for (let i = 0; i < strings.length; i++) {
-      if (strings[i]) emit(strings[i]);
+      strings[i] && emit(strings[i]);
       for await (const chunk of normalize(values[i])) {
         emit(chunk);
       }
     }
   };
-}
 
-export function chunkedHtml(): {
-  chunks: ChunkedStream<string>;
-  stream: ReadableStream<Uint8Array>;
-} {
-  const encoder = new TextEncoder();
+export function chunkedHtml() {
   const chunks = new ChunkedStream<string>();
 
   const stream = new ReadableStream<Uint8Array>({
-    async pull(controller) {
-      if (chunks.closed) return;
-      const result = await chunks.next();
-      result.done
-        ? controller.close()
-        : controller.enqueue(encoder.encode(result.value));
+    async start(controller) {
+      const encoder = new TextEncoder();
+      for await (const chunk of chunks) {
+        controller.enqueue(encoder.encode(chunk));
+      }
+      controller.close();
     },
-    cancel() {
-      chunks.close();
-    },
+    cancel: chunks.close,
   });
 
   return { chunks, stream };
 }
 
+const DOCUMENT_TYPE = "<!DOCTYPE html>";
+const HTML_BEGIN = (lang: string) =>
+  `<html lang="${lang}"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1.0">`;
+const HEAD_END = "</head><body";
+const BODY_END = ">";
+const HTML_END = "</body></html>";
+
 export async function createHtmlStream(options: StreamOptions = {}) {
   const { chunks, stream } = chunkedHtml();
   const writer = makeChunkWriter(chunks);
 
-  await writer`<!DOCTYPE html>
-<html lang="${options.lang || "en"}">
-<head>
-<meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1.0">
-${options.headContent || ""}
-</head>
-<body ${options.bodyAttributes || ""}>`;
+  chunks.write(DOCUMENT_TYPE);
+  chunks.write(HTML_BEGIN(options.lang || "en"));
+  options.headContent && chunks.write(options.headContent);
+  chunks.write(HEAD_END);
+  options.bodyAttributes && chunks.write(" " + options.bodyAttributes);
+  chunks.write(BODY_END);
 
   return {
     write: writer,
-    stream,
+    blob: stream,
     chunks,
     close() {
-      if (chunks.closed) return;
-      chunks.write("</body></html>");
-      chunks.close();
+      if (!chunks.closed) {
+        chunks.write(HTML_END);
+        chunks.close();
+      }
     },
     get response(): Response {
       return new Response(stream, {

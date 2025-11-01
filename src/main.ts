@@ -10,19 +10,18 @@ Deno.serve({
   port: 8080,
   async handler() {
     const stream = await createHtmlStream({ lang: "en" });
-    const { h1, p, li } = html(stream.chunks, stream.write);
+    const { h1, ol, p, li } = html(stream.chunks);
 
-    await h1`<h1>Normal Streaming Page</h1>`;
+    await h1`Normal Streaming Page`;
     await p({ class: "oh hey" }, "meowing chunk by chunk");
 
-    (async () => {
+    ol(async () => {
       const fruits = ["Apple", "Banana", "Cherry"];
-
       for (const fruit of fruits) {
         await new Promise((r) => setTimeout(r, 500));
         await li(fruit);
       }
-    })();
+    });
 
     return stream.response;
   },

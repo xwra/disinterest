@@ -3,102 +3,127 @@
  * SPDX-License-Identifier: AGPL-3.0-or-later
  */
 
-import { type Chunk, ChunkedWriter } from "./http.ts";
+import { type Chunk } from "./http.ts";
 import { ChunkedStream } from "./stream.ts";
 
 type Attrs = Record<string, string | number | boolean>;
 
-const SELF_CLOSING_TAGS = new Set([
+const VOID_TAGS = new Set([
+  "area",
+  "base",
   "br",
+  "col",
   "embed",
   "hr",
   "img",
   "input",
   "link",
   "meta",
-  "track",
+  "param",
   "source",
+  "track",
+  "wbr",
 ]);
 
+const ESCAPE_MAP: Record<string, string> = {
+  "&": "&amp;",
+  "<": "&lt;",
+  ">": "&gt;",
+  '"': "&quot;",
+  "'": "&#039;",
+};
+
 export function escape(input: string): string {
-  return input
-    .replace(/&/g, "&amp;")
-    .replace(/</g, "&lt;")
-    .replace(/>/g, "&gt;")
-    .replace(/"/g, "&quot;")
-    .replace(/'/g, "&#039;");
+  let result = "";
+  let lastIndex = 0;
+
+  for (let i = 0; i < input.length; i++) {
+    const replacement = ESCAPE_MAP[input[i]];
+    if (replacement) {
+      result += input.slice(lastIndex, i) + replacement;
+      lastIndex = i + 1;
+    }
+  }
+
+  return lastIndex ? result + input.slice(lastIndex) : input;
 }
 
-function attrsToString(
-  attrs: Attrs | undefined,
-  escape: (str: string) => string,
-): string {
+function serialize(attrs: Attrs | undefined): string {
   if (!attrs) return "";
-  const pairs = Object.entries(attrs)
-    .filter(([_, value]) => value !== undefined && value !== null)
-    .map(([key, value]) => {
-      if (value === true) return key;
-      if (value === false) return "";
-      return `${key}="${escape(String(value))}"`;
-    })
-    .filter(Boolean);
-  return pairs.length ? " " + pairs.join(" ") : "";
+  let output = "";
+
+  for (const key in attrs) {
+    const val = attrs[key];
+    if (val == null || val === false) continue;
+    output += " ";
+    output += val === true ? key : `${key}="${escape(String(val))}"`;
+  }
+
+  return output;
 }
 
-type TagFunction = {
-  (attrs: Attrs, ...children: Chunk[]): Promise<void>;
-  (...children: Chunk[]): Promise<void>;
+type TagRes = void | Promise<void>;
+
+type TagFn = {
+  (attrs: Attrs, ...children: Chunk[]): TagRes;
+  (...children: Chunk[]): TagRes;
+  (template: TemplateStringsArray, ...values: Chunk[]): TagRes;
+  (fn: () => any): TagRes;
 };
 
-type HtmlBuilder = {
-  [K: string]: TagFunction;
+type HtmlProxy = { [K in keyof HTMLElementTagNameMap]: TagFn } & {
+  [key: string]: TagFn;
 };
+
+const isTemplateLiteral = (arg: any): arg is TemplateStringsArray =>
+  Array.isArray(arg) && "raw" in arg;
+
+const isAttributes = (arg: any): arg is Record<string, any> =>
+  arg && typeof arg === "object" && !isTemplateLiteral(arg);
+
+async function render(child: any): Promise<string> {
+  if (child == null) return "";
+  if (typeof child === "string" || typeof child === "number") {
+    return String(child);
+  }
+  if (child instanceof Promise) return render(await child);
+  if (Array.isArray(child)) {
+    return (await Promise.all(child.map(render))).join("");
+  }
+  if (typeof child === "function") return render(await child());
+  return String(child);
+}
 
 export function html(
   chunks: ChunkedStream<string>,
-  write: ChunkedWriter,
-): HtmlBuilder {
-  const tags = new Map<string, (...args: any[]) => Promise<void>>();
+): HtmlProxy {
+  const cache = new Map<string, TagFn>();
+  const write = (buf: string) => !chunks.closed && chunks.write(buf);
 
-  const handler: ProxyHandler<Record<string, TagFunction>> = {
+  const handler: ProxyHandler<Record<string, TagFn>> = {
     get(_, tag: string) {
-      if (tags.has(tag)) {
-        return tags.get(tag);
-      }
+      let fn = cache.get(tag);
+      if (fn) return fn;
 
-      const fn = async (...args: (Chunk | Attrs)[]) => {
-        const isTemplate = args.length === 1 && Array.isArray(args[0]) &&
-          "raw" in args[0];
-        const hasAttrs = !isTemplate && args.length &&
-          typeof args[0] === "object";
+      fn = async (...args: any[]) => {
+        const attrs = isAttributes(args[0]) ? args.shift() : undefined;
 
-        const attrs: Attrs | undefined = hasAttrs
-          ? args.shift() as Attrs
-          : undefined;
-        const children: Chunk[] = args as Chunk[];
+        const isVoid = VOID_TAGS.has(tag.toLowerCase());
+        const attributes = serialize(attrs);
 
-        const attributes = attrsToString(attrs, escape);
-        const isSelfClosing = SELF_CLOSING_TAGS.has(tag.toLowerCase());
-        if (!isSelfClosing && !children.length) return;
-        chunks.write(`<${tag}${attributes}${isSelfClosing ? " /" : ""}>`);
+        write(`<${tag}${attributes}${isVoid ? "/" : ""}>`);
+        if (isVoid) return;
 
-        if (!isSelfClosing) {
-          if (isTemplate) {
-            await (write as any)(...children);
-          } else {
-            for (const child of children) {
-              typeof child === "function"
-                ? await (child as any)()
-                : chunks.write(String(await child));
-            }
-          }
-          chunks.write(`</${tag}>`);
+        for (const child of args) {
+          write(await render(child));
         }
+
+        write(`</${tag}>`);
       };
 
-      tags.set(tag, fn);
-      return fn;
+      return cache.set(tag, fn), fn;
     },
   };
-  return new Proxy({}, handler);
+
+  return new Proxy({}, handler) as HtmlProxy;
 }
