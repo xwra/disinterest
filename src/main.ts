@@ -8,10 +8,10 @@ import App from "./app.tsx";
 import { render } from "interest/jsx-runtime";
 
 Deno.serve({
-  port: 8080,
-  async handler() {
-    const stream = await createHtmlStream({ lang: "en" });
-    await render(App(), stream.chunks);
-    return stream.response;
-  },
+	port: 8080,
+	async handler() {
+		const stream = await createHtmlStream({ lang: "en" });
+		await render(App(), stream.chunks);
+		return stream.response;
+	},
 });

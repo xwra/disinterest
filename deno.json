@@ -1,26 +1,30 @@
 {
-  "tasks": {
-    "dev": "deno run --allow-net src/main.ts"
-  },
-  "imports": {
-    "interest/jsx-runtime": "./src/jsx.ts"
-  },
-  "lint": {
-    "rules": {
-      "tags": [
-        "recommended"
-      ],
-      "exclude": ["no-explicit-any", "require-await"]
-    }
-  },
-  "compilerOptions": {
-    "jsx": "react-jsx",
-    "jsxImportSource": "interest",
-    "lib": [
-      "deno.ns",
-      "esnext",
-      "dom",
-      "dom.iterable"
-    ]
-  }
+	"tasks": {
+		"dev": "deno run --allow-net src/main.ts"
+	},
+	"imports": {
+		"interest/jsx-runtime": "./src/jsx.ts"
+	},
+	"fmt": {
+		"useTabs": true,
+		"semiColons": true
+	},
+	"lint": {
+		"rules": {
+			"tags": [
+				"recommended"
+			],
+			"exclude": ["no-explicit-any", "require-await"]
+		}
+	},
+	"compilerOptions": {
+		"jsx": "react-jsx",
+		"jsxImportSource": "interest",
+		"lib": [
+			"deno.ns",
+			"esnext",
+			"dom",
+			"dom.iterable"
+		]
+	}
 }
